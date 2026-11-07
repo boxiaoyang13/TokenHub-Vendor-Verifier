@@ -20,6 +20,18 @@ set -euo pipefail
 KIT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$KIT_DIR"
 
+# ---- 自动启用仓库根目录的 .venv（若存在且尚未激活）----
+# 依赖（evalscope/pyarrow 等）装在该 venv 中，避免误用系统 Python 再重复安装一遍。
+if [[ -z "${VIRTUAL_ENV:-}" ]]; then
+    for _venv in "$KIT_DIR/../.venv" "$KIT_DIR/.venv"; do
+        if [[ -f "$_venv/bin/activate" ]]; then
+            # shellcheck disable=SC1091
+            source "$_venv/bin/activate"
+            break
+        fi
+    done
+fi
+
 # ---- 颜色 ----
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -176,6 +188,20 @@ cmd_check() {
     if [[ -d perf/datasets ]]; then
         local count=$(ls perf/datasets/*.jsonl 2>/dev/null | wc -l)
         echo -e "  perf/datasets: ${GREEN}${count} 个数据集${NC}"
+        # 数据集用 Git LFS 托管：未 git lfs pull 时只有指针文件，压测会报
+        # "produced no conversations!"，这里提前给出明确提示
+        local lfs_bad=0 f
+        for f in perf/datasets*/*.jsonl; do
+            [[ -f "$f" ]] || continue
+            if head -c 128 "$f" 2>/dev/null | grep -q 'git-lfs.github.com/spec/v1'; then
+                lfs_bad=$((lfs_bad+1))
+            fi
+        done
+        if [[ $lfs_bad -gt 0 ]]; then
+            echo -e "  ${RED}✗ ${lfs_bad} 个数据集是 Git LFS 指针（未拉取真实数据）${NC}"
+            echo -e "    修复: ${BLUE}sudo apt-get install -y git-lfs && git lfs install && git lfs pull${NC}"
+            echo -e "    （需在仓库根目录执行，数据约 3GB）"
+        fi
     else
         echo -e "  perf/datasets: ${YELLOW}不存在（性能压测需要）${NC}"
     fi

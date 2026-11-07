@@ -33,6 +33,17 @@ set -eu
 KIT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$KIT_DIR"
 
+# 自动启用仓库根目录的 .venv（若存在且尚未激活），保证直接用 bash run.sh 也能找到 evalscope
+if [[ -z "${VIRTUAL_ENV:-}" ]]; then
+    for _venv in "$KIT_DIR/../../.venv" "$KIT_DIR/../.venv" "$KIT_DIR/.venv"; do
+        if [[ -f "$_venv/bin/activate" ]]; then
+            # shellcheck disable=SC1091
+            source "$_venv/bin/activate"
+            break
+        fi
+    done
+fi
+
 # 注入 sitecustomize 兼容补丁：修复 transformers 5.x 下 apply_chat_template 返回
 # BatchEncoding 导致的 evalscope token 计数错误（produced no conversations）
 export PYTHONPATH="$KIT_DIR/scripts${PYTHONPATH:+:$PYTHONPATH}"
@@ -62,6 +73,87 @@ else
     _DEFAULT_DATASET_DIR="datasets"
 fi
 DATASET_DIR="${DATASET_DIR:-$_DEFAULT_DATASET_DIR}"
+
+# 数据集以 Git LFS 托管：未执行 `git lfs pull` 时，工作区里只有 130 字节左右的
+# LFS 指针文本（以 "version https://git-lfs.github.com/spec/v1" 开头）。
+# 这种文件会被 evalscope 当成坏 JSON 行逐条跳过，最终只报一句含糊的
+# "Dataset \"custom_multi_turn\" produced no conversations!"，因此这里提前拦截并给出修复指引。
+is_lfs_pointer() {
+    local f="$1"
+    [[ -f "$f" ]] || return 1
+    # 指针文件很小，只读前 128 字节判断，避免对大文件做全量读取
+    head -c 128 "$f" 2>/dev/null | grep -q 'git-lfs.github.com/spec/v1'
+}
+
+# 校验数据集可用（存在 + 非 LFS 指针），不可用时打印原因并返回 1
+check_dataset_file() {
+    local ds="$1"
+    if [[ ! -f "$ds" ]]; then
+        echo "数据集不存在: $ds" >&2
+        return 1
+    fi
+    if is_lfs_pointer "$ds"; then
+        echo "[fail] 数据集是 Git LFS 指针文件，尚未拉取真实数据: $ds" >&2
+        echo "       修复：在仓库根目录执行" >&2
+        echo "         sudo apt-get install -y git-lfs   # 或 brew install git-lfs" >&2
+        echo "         git lfs install && git lfs pull" >&2
+        return 1
+    fi
+    return 0
+}
+
+# 支持的档位（与 datasets*/perf_zh_<bucket>.jsonl 一一对应）
+KNOWN_BUCKETS="1k 9k 16k 32k 64k 128k 200k 512k 1m"
+
+is_known_bucket() {
+    local b="$1" k
+    for k in $KNOWN_BUCKETS; do
+        [[ "$b" == "$k" ]] && return 0
+    done
+    return 1
+}
+
+# 拼写纠错：把 8k / 256k / 1m 这类输入映射到最接近的已知档位
+suggest_bucket() {
+    local b="$1" want
+    want=$(awk -v b="$b" 'BEGIN {
+        if (b !~ /^[0-9]+[kKmM]$/) exit 1
+        n = substr(b, 1, length(b) - 1) + 0
+        u = tolower(substr(b, length(b), 1))
+        printf "%d", n * (u == "k" ? 1000 : 1000000)
+    }' 2>/dev/null) || return 1
+    [[ -z "$want" ]] && return 1
+    local best="" bestd="" k kt d
+    for k in $KNOWN_BUCKETS; do
+        kt=$(bucket_tokens "$k")
+        if [[ $kt -gt $want ]]; then d=$((kt - want)); else d=$((want - kt)); fi
+        if [[ -z "$bestd" || $d -lt $bestd ]]; then best="$k"; bestd="$d"; fi
+    done
+    [[ -n "$best" ]] && echo "$best"
+}
+
+# 档位校验：未知档位 / 数据集缺失 / LFS 未拉取统一在这里报清楚。
+# 必须在下载 tokenizer、建结果目录之前调用，避免参数写错还白等十几秒。
+validate_bucket() {
+    local b="$1"
+    if ! is_known_bucket "$b"; then
+        echo "[fail] 未知档位: ${b:-<空>}" >&2
+        echo "       可选档位: $KNOWN_BUCKETS" >&2
+        local near
+        near=$(suggest_bucket "$b" || true)
+        if [[ -n "$near" ]]; then
+            echo "       你是不是想用: $near   （用法示例: bash run.sh bench $near 1024 256）" >&2
+        fi
+        return 1
+    fi
+    local ds="${DATASET_DIR}/perf_zh_${b}.jsonl"
+    if [[ ! -f "$ds" ]]; then
+        echo "[fail] 档位 $b 的数据集不存在: $ds" >&2
+        echo "       当前 DATASET_DIR=$DATASET_DIR（512k/1m 仅随 datasets_clean/ 提供）" >&2
+        return 1
+    fi
+    check_dataset_file "$ds"
+}
 
 # 统一变量名：API_URL / API_KEY / MODEL_NAME
 API_URL="${API_URL:-${TOKENHUB_URL:-}}"
@@ -187,7 +279,8 @@ try:
     print(f"  [tokenizer] 已缓存: {tok_name}")
 except Exception:
     print(f"  [tokenizer] 未缓存，开始下载 {tok_name} ...")
-    # 调用 setup_tokenizer.py 完成下载 + 注入 chat_template（显式传入目标 tokenizer 名）
+    # 调用 setup_tokenizer.py 完成下载（显式传入目标 tokenizer 名）；
+    # tokenizer 自身缺 chat_template 时，由 scripts/sitecustomize.py 在运行时兜底注入
     ret = subprocess.call(["python3", setup_script], env={**os.environ, "TOKENIZER": tok_name})
     if ret != 0:
         print(f"  [tokenizer] 下载失败，请检查网络或手动执行: python3 {setup_script}", file=sys.stderr)
@@ -245,14 +338,20 @@ cmd_check() {
         echo "  [warn] TOKENIZER 未设置，请在 configs/.env 中指定 tokenizer 仓库名"
     fi
     echo "[check] datasets... (DATASET_DIR=$DATASET_DIR)"
-    for f in 1k 9k 16k 32k 64k 128k 200k; do
-        if [[ -f "${DATASET_DIR}/perf_zh_${f}.jsonl" ]]; then
-            sz=$(du -h "${DATASET_DIR}/perf_zh_${f}.jsonl" | cut -f1)
-            echo "  OK: perf_zh_${f}.jsonl ($sz)"
+    local lfs_bad=0
+    for f in 1k 9k 16k 32k 64k 128k 200k 512k 1m; do
+        local ds="${DATASET_DIR}/perf_zh_${f}.jsonl"
+        if [[ ! -f "$ds" ]]; then
+            echo "  [warn] 缺失: $ds"
+        elif is_lfs_pointer "$ds"; then
+            echo "  [fail] LFS 指针未解析: $ds（执行 git lfs install && git lfs pull）"
+            lfs_bad=1
         else
-            echo "  [warn] 缺失: datasets/perf_zh_${f}.jsonl"
+            sz=$(du -h "$ds" | cut -f1)
+            echo "  OK: perf_zh_${f}.jsonl ($sz)"
         fi
     done
+    [[ $lfs_bad -eq 1 ]] && echo "  [fail] 数据集未拉取完整，压测会报 'produced no conversations'"
     echo "[check] configs/.env..."
     [[ -f "$ROOT_DIR/configs/.env" ]] && echo "  OK" || echo "  [warn] 不存在，请 cp configs/env.example configs/.env"
     echo "[check] API_URL / API_KEY / MODEL_NAME..."
@@ -268,14 +367,34 @@ cmd_check() {
 }
 
 cmd_bench() {
+    local bucket="${1:-}"
+    local n="${2:-500}"
+    local p="${3:-10}"
+
+    # ---- 参数校验（放最前：档位/参数写错时秒级失败，不下载 tokenizer、不建空结果目录）----
+    if [[ -z "$bucket" ]]; then
+        echo "[fail] 缺少档位参数" >&2
+        echo "       用法: bash run.sh bench <bucket> [N] [P]" >&2
+        echo "       可选档位: $KNOWN_BUCKETS" >&2
+        exit 1
+    fi
+    validate_bucket "$bucket" || exit 1
+    case "$n" in ''|*[!0-9]*) echo "[fail] 请求总数 N 必须是正整数，当前: $n" >&2; exit 1 ;; esac
+    case "$p" in ''|*[!0-9]*) echo "[fail] 并发数 P 必须是正整数，当前: $p" >&2; exit 1 ;; esac
+    if [[ "$n" -lt 1 ]]; then echo "[fail] 请求总数 N 必须 ≥1，当前: $n" >&2; exit 1; fi
+    if [[ "$p" -lt 1 ]]; then echo "[fail] 并发数 P 必须 ≥1，当前: $p" >&2; exit 1; fi
+    local max_par; max_par=$(bucket_max_parallel "$bucket")
+    if [[ "$p" -gt "$max_par" ]]; then
+        echo "[warn] 并发 P=$p 超过档位 $bucket 的约定上限 $max_par（bench-all 会自动裁到该值），仅提示，不中止" >&2
+    fi
+    if [[ "$n" -lt "$p" ]]; then
+        echo "[warn] 请求总数 N=$n < 并发 P=$p，实际只有 $n 个并发能各跑 1 条，统计无参考价值" >&2
+    fi
+
     ensure_perf_deps
     auto_detect_tokenizer
     ensure_tokenizer_cached
-    local bucket="$1"
-    local n="${2:-500}"
-    local p="${3:-10}"
     local ds="${DATASET_DIR}/perf_zh_${bucket}.jsonl"
-    [[ ! -f "$ds" ]] && { echo "数据集不存在: $ds"; exit 1; }
     [[ -z "$API_KEY" ]] && { echo "[fail] API_KEY 未设置，请编辑 configs/.env"; exit 1; }
     [[ -z "$API_URL" ]] && { echo "[fail] API_URL 未设置，请编辑 configs/.env"; exit 1; }
     [[ -z "$MODEL_NAME" ]] && { echo "[fail] MODEL_NAME 未设置，请编辑 configs/.env"; exit 1; }
@@ -415,8 +534,9 @@ cmd_bench_all() {
     for label in "${bucket_arr[@]}"; do
         idx=$((idx+1))
         local ds="${DATASET_DIR}/perf_zh_${label}.jsonl"
-        if [[ ! -f "$ds" ]]; then
-            tlog "⚠ [$label] 数据集不存在: $ds，跳过"
+        if ! ds_err=$(validate_bucket "$label" 2>&1); then
+            tlog "$ds_err"
+            tlog "⚠ [$label] 档位不可用，跳过"
             continue
         fi
 

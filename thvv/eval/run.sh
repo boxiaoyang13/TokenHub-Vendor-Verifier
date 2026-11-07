@@ -16,6 +16,17 @@ set -eu
 KIT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$KIT_DIR"
 
+# 自动启用仓库根目录的 .venv（若存在且尚未激活）
+if [[ -z "${VIRTUAL_ENV:-}" ]]; then
+    for _venv in "$KIT_DIR/../../.venv" "$KIT_DIR/../.venv" "$KIT_DIR/.venv"; do
+        if [[ -f "$_venv/bin/activate" ]]; then
+            # shellcheck disable=SC1091
+            source "$_venv/bin/activate"
+            break
+        fi
+    done
+fi
+
 ROOT_DIR="$(cd "$KIT_DIR/.." && pwd)"
 
 # ---- 加载 .env ----

@@ -618,7 +618,7 @@ def write_tpm_html(xlsx_path, rows):
     print(f"   TPM 趋势 HTML: {html_path}")
 
 
-_HTML_TPM_TEMPLATE = '''<!DOCTYPE html>
+_HTML_TPM_TEMPLATE = r'''<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8"><title>TPM & QPM 趋势图</title>

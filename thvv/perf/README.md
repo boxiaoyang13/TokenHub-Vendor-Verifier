@@ -194,6 +194,14 @@ python3 scripts/gen_report_from_db.py --results-dir results --client "供应商�
 
 ## 数据集说明
 
+> ⚠️ **前置：数据集用 Git LFS 托管（约 3 GB）**。首次使用请先拉取真实数据，否则工作区里
+> 只有 LFS 指针文件，压测会报 `Dataset "custom_multi_turn" produced no conversations!`：
+> ```bash
+> sudo apt-get install -y git-lfs   # 或 brew install git-lfs
+> git lfs install && git lfs pull   # 在仓库根目录执行
+> ```
+> 可用 `bash run.sh check` / `bash ../quickstart.sh check` 确认是否已拉取。
+
 数据集为中文长文档对话，每行一组 OpenAI Messages 格式的 JSON 数组：
 
 ```json

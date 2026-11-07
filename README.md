@@ -2,6 +2,12 @@
 
 对大模型供应商做**性能压测**与**效果评测**的一体化验证工具集。性能压测支持 OpenAI / Anthropic 双协议端点，效果评测支持任意 OpenAI 兼容端点，跑完自动产出报告与结构化产物。
 
+> ⚠️ **当前开发在 `dev` 分支**：bench-agent 服务端联调的最新修复（venv 自动激活、
+> 长档位分词器、sitecustomize 兼容补丁等）都在 `dev` 上，克隆后请先切换：
+> ```bash
+> git checkout dev
+> ```
+
 > 命名：THVV = TokenHub Vendor Verifier，用于供应商引入前的能力验证与产物归档。
 
 ---
@@ -45,6 +51,64 @@
         ├── 效果验收标准.xlsx  # 效果验收标准（eval）
         └── results/           # 产物：eval_report_v2.html / eval_summary.json / per_sample_details.csv
 ```
+
+---
+
+## 安装
+
+### 前置要求
+
+- Python **3.10+**（3.12 已验证）
+- Git + **Git LFS**（压测数据集约 3GB 走 LFS 托管，不装 LFS 只有指针文件）
+- 磁盘 ≥ 10GB（数据集 3GB + tokenizer 缓存 + 评测产物）
+
+### 1. 克隆并切换到 dev 分支
+
+```bash
+git clone https://github.com/boxiaoyang13/TokenHub-Vendor-Verifier.git
+cd TokenHub-Vendor-Verifier
+git checkout dev        # ★ 联调修复都在 dev 分支
+git lfs install         # 首次使用 LFS 需初始化（一次即可）
+git lfs pull            # 拉取压测数据集真实内容（约 3GB，必须执行）
+```
+
+> 不执行 `git lfs pull` 时，压测会报
+> `Dataset "custom_multi_turn" produced no conversations!`——工作区里只有
+> 130 字节左右的 LFS 指针文件。MSR-VTT 视频样本同样走 LFS。
+
+### 2. 创建 Python 虚拟环境（推荐装在仓库根目录）
+
+```bash
+cd TokenHub-Vendor-Verifier
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+> 装在仓库根目录（`<repo>/.venv`）时，`quickstart.sh` / `perf/run.sh` /
+> `eval/run.sh` 会**自动激活**，直接 `bash quickstart.sh ...` 即可；
+> 装在其它位置请先手动 `source <venv>/bin/activate`。
+
+### 3. 安装依赖
+
+```bash
+bash thvv/quickstart.sh install     # 自动检测并安装 perf + eval 全部依赖
+# 或手动：
+pip install -r thvv/perf/requirements.txt   # 性能压测：evalscope[perf] + transformers + modelscope
+pip install -r thvv/eval/requirements.txt    # 效果评测：evalscope==1.9.0 + modelscope==1.38.1 + ...
+```
+
+两份 requirements 有意分开（perf 要新版 evalscope，eval 锁 1.9.0），
+装进同一个 venv 没有冲突（eval 的锁版本同时满足 perf 的 >= 要求）。
+
+### 4. 验证安装
+
+```bash
+bash thvv/quickstart.sh check
+```
+
+会依次检查 Python / evalscope / 配置 / 数据集（含 LFS 指针检测）/ tokenizer，
+全部 ✅ 即可开始使用。也可以配合 bench-agent 服务端使用（Go 侧编排，
+见 `bench-agent` 仓库），`roots.thvv` 指到本仓库即可。
 
 ---
 
